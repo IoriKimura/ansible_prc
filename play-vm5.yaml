@@ -1,0 +1,191 @@
+- name: Practical Work #5 Configuration
+  hosts: centos
+  become: yes
+  vars:
+    target_package: nginx
+    target_version: 1.14.1
+    config_file_path: /etc/nginx/nginx.conf
+    backup_dir: /etc/backups
+    cron_job: "*/5 * * * * echo 'Ansible cron job' >> /var/log/ansible-cron.log"
+    git_repos:
+      - { url: "https://github.com/expressjs/express.git", dest: "/opt/express", deps_cmd: "npm install" }
+      - { url: "https://github.com/flask-restful/flask-restful.git", dest: "/opt/flask-restful", deps_cmd: "pip3 install -r tests/requirements.txt" }
+      - { url: "https://github.com/acemilyalcin/sample-node-project.git", dest: "/opt/sample-node", deps_cmd: "npm install" }
+    extra_repo_url: "https://dl.fedoraproject.org/pub/epel/epel-release-latest-8.noarch.rpm"
+    package_from_extra_repo: "htop"
+
+  tasks:
+      # 0. Исправление репозиториев CentOS 8 (исправленная версия)
+    - name: Fix CentOS 8 repositories
+      tags: fix_repos
+      block:
+        - name: Update repository URLs to vault.centos.org
+          ansible.builtin.shell: |
+            for file in /etc/yum.repos.d/CentOS-*; do
+              sed -i 's|mirrorlist.centos.org|vault.centos.org|g' "$file"
+            done
+          args:
+            executable: /bin/bash
+          when: ansible_distribution == "CentOS" and ansible_distribution_major_version == "8"
+
+        - name: Uncomment baseurl in repositories
+          ansible.builtin.shell: |
+            for file in /etc/yum.repos.d/CentOS-*; do
+              sed -i 's|#baseurl=http://mirror.centos.org|baseurl=http://vault.centos.org|g' "$file"
+            done
+          args:
+            executable: /bin/bash
+          when: ansible_distribution == "CentOS" and ansible_distribution_major_version == "8"
+
+        - name: Clean and rebuild dnf cache
+          ansible.builtin.shell: |
+            dnf clean all
+            dnf makecache
+            yum install git -y
+          args:
+            executable: /bin/bash
+
+    # 1. Запись текущего времени и пользователя в файл
+    - name: Write current time and user to file
+      tags: time_user
+      ansible.builtin.copy:
+        content: "Time: {{ ansible_date_time.iso8601 }}\nUser: {{ ansible_user_id }}\n"
+        dest: /home/vagrant/ansible_info.txt
+        owner: vagrant
+        group: vagrant
+        mode: '0644'
+
+    # 2. Установка конкретной версии nginx
+    - name: Install specific version of nginx
+      tags: install_nginx
+      ansible.builtin.yum:
+        name: "{{ target_package }}-{{ target_version }}"
+        state: present
+
+    # 3. Надежная установка EPEL
+    - name: Ensure EPEL is installed
+      tags: add_extra_repo
+      block:
+        - name: Disable problematic EPEL repos first
+          ansible.builtin.shell: |
+            [ -f /etc/yum.repos.d/epel-testing.repo ] && sed -i 's/^enabled=1/enabled=0/' /etc/yum.repos.d/epel-testing*
+            dnf clean all
+          args:
+            executable: /bin/bash
+          ignore_errors: yes
+
+        - name: Install EPEL release
+          ansible.builtin.yum:
+            name: epel-release
+            state: present
+            disablerepo: epel-testing*
+            enablerepo: epel
+
+        - name: Install htop with retry
+          ansible.builtin.yum:
+            name: htop
+            state: present
+            enablerepo: epel
+            disablerepo: epel-testing*
+          register: htop_install
+          until: htop_install is succeeded
+          retries: 3
+          delay: 10
+          ignore_errors: yes
+
+        - name: Verify htop installation
+          ansible.builtin.command: htop --version
+          register: htop_check
+          failed_when: htop_check.rc != 0
+          when: htop_install is succeeded
+
+    # 4. Редактирование конфигурации nginx
+    - name: Edit nginx config file
+      tags: edit_config
+      ansible.builtin.lineinfile:
+        path: "{{ config_file_path }}"
+        regexp: '^worker_processes'
+        line: 'worker_processes 2;'
+        backup: yes
+
+    # 5. Шаблонизация конфигурации nginx
+    - name: Create backup directory
+      tags: backup_config
+      ansible.builtin.file:
+        path: "{{ backup_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Backup current nginx config
+      tags: backup_config
+      ansible.builtin.copy:
+        remote_src: yes
+        src: "{{ config_file_path }}"
+        dest: "{{ backup_dir }}/nginx.conf.bak_{{ ansible_date_time.iso8601 }}"
+        mode: '0644'
+
+    - name: Deploy new nginx config from template
+      tags: template_config
+      ansible.builtin.template:
+        src: nginx.conf.j2
+        dest: "{{ config_file_path }}"
+        mode: '0644'
+      notify: restart nginx
+
+    # 6. Скачивание файла с интернета
+    - name: Download example file
+      tags: download_file
+      ansible.builtin.get_url:
+        url: https://dl.grafana.com/oss/release/grafana-11.6.0.linux-amd64.tar.gz
+        dest: /tmp/grafana11.6.tar.gz
+        force: no
+      retries: 3
+      delay: 5
+
+    # 7. Настройка cron-задачи
+    - name: Add cron job
+      tags: cron_job
+      ansible.builtin.cron:
+        name: "Ansible cron job"
+        minute: "5"
+        job: "echo 'Ansible cron job' >> /var/log/ansible-cron.log"
+        user: root
+        cron_file: ansible_cron
+
+    # 8. Установка git и клонирование репозиториев
+    - name: Install git and dependencies
+      tags: install_deps
+      ansible.builtin.yum:
+        name: [git, npm, python3-pip]
+        state: present
+
+    - name: Clone git repositories
+      tags: clone_repos
+      ansible.builtin.git:
+        repo: "{{ item.url }}"
+        dest: "{{ item.dest }}"
+        clone: yes
+        update: no
+      loop: "{{ git_repos }}"
+
+    - name: Install repositories dependencies
+      tags: install_repo_deps
+      ansible.builtin.command: "{{ item.deps_cmd }}"
+      args:
+        chdir: "{{ item.dest }}"
+      loop: "{{ git_repos }}"
+
+    # 9. Запуск nginx
+    - name: Ensure nginx is running
+      tags: start_service
+      ansible.builtin.service:
+        name: nginx
+        state: started
+        enabled: yes
+
+  handlers:
+    - name: restart nginx
+      tags: restart_service
+      ansible.builtin.service:
+        name: nginx
+        state: restarted
