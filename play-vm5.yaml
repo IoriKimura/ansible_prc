@@ -49,11 +49,14 @@
     - name: Write current time and user to file
       tags: time_user
       ansible.builtin.copy:
-        content: "Time: {{ ansible_date_time.iso8601 }}\nUser: {{ ansible_user_id }}\n"
+        content: |
+          Time: {{ lookup('pipe', 'date -Is') }}
+          User: {{ lookup('pipe', 'whoami') }}
         dest: /home/vagrant/ansible_info.txt
         owner: vagrant
         group: vagrant
         mode: '0644'
+      become: no
 
     # 2. Установка конкретной версии nginx
     - name: Install specific version of nginx
@@ -121,7 +124,7 @@
       ansible.builtin.copy:
         remote_src: yes
         src: "{{ config_file_path }}"
-        dest: "{{ backup_dir }}/nginx.conf.bak_{{ ansible_date_time.iso8601 }}"
+        dest: "{{ backup_dir }}/nginx.conf.bak_{{ lookup('pipe', 'date +%Y-%m-%dT%H:%M:%S%z') }}"
         mode: '0644'
 
     - name: Deploy new nginx config from template
