@@ -75,7 +75,7 @@
             dnf clean all
           args:
             executable: /bin/bash
-          ignore_errors: yes
+          ignore_errors: true
 
         - name: Install EPEL release
           ansible.builtin.yum:
@@ -94,7 +94,7 @@
           until: htop_install is succeeded
           retries: 3
           delay: 10
-          ignore_errors: yes
+          ignore_errors: true
 
         - name: Verify htop installation
           ansible.builtin.command: htop --version
@@ -179,12 +179,11 @@
       loop: "{{ git_repos }}"
 
     # 9. Запуск nginx
-    - name: Ensure nginx is running
-      tags: start_service
+    - name: Restart nginx service
+      tags: restart_nginx
       ansible.builtin.service:
         name: nginx
-        state: started
-        enabled: yes
+        state: restarted
 
   handlers:
     - name: restart nginx
